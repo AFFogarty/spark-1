@@ -85,7 +85,10 @@ class SparkSession private(
   private val creationSite: CallSite = Utils.getCallSite()
 
   private[sql] def this(sc: SparkContext) {
-    this(sc, None, None, new SparkSessionExtensions)
+    this(sc, None, None,
+      SparkSession.applyExtensions(
+        sc.getConf.get(StaticSQLConf.SPARK_SESSION_EXTENSIONS).getOrElse(Seq.empty),
+        new SparkSessionExtensions))
   }
 
   sparkContext.assertNotStopped()
@@ -931,23 +934,9 @@ object SparkSession extends Logging {
           // Do not update `SparkConf` for existing `SparkContext`, as it's shared by all sessions.
         }
 
-        // Initialize extensions if the user has defined a configurator class.
-        val extensionConfOption = sparkContext.conf.get(StaticSQLConf.SPARK_SESSION_EXTENSIONS)
-        if (extensionConfOption.isDefined) {
-          val extensionConfClassName = extensionConfOption.get
-          try {
-            val extensionConfClass = Utils.classForName(extensionConfClassName)
-            val extensionConf = extensionConfClass.newInstance()
-              .asInstanceOf[SparkSessionExtensions => Unit]
-            extensionConf(extensions)
-          } catch {
-            // Ignore the error if we cannot find the class or when the class has the wrong type.
-            case e @ (_: ClassCastException |
-                      _: ClassNotFoundException |
-                      _: NoClassDefFoundError) =>
-              logWarning(s"Cannot use $extensionConfClassName to configure session extensions.", e)
-          }
-        }
+        applyExtensions(
+          sparkContext.getConf.get(StaticSQLConf.SPARK_SESSION_EXTENSIONS).getOrElse(Seq.empty),
+          extensions)
 
         session = new SparkSession(sparkContext, None, None, extensions)
         options.foreach { case (k, v) => session.initialSessionOptions.put(k, v) }
@@ -1147,5 +1136,29 @@ object SparkSession extends Logging {
       SparkSession.clearActiveSession()
       SparkSession.clearDefaultSession()
     }
+  }
+
+  /**
+   * Initialize extensions for given extension classnames. The classes will be applied to the
+   * extensions passed into this function.
+   */
+  private def applyExtensions(
+      extensionConfClassNames: Seq[String],
+      extensions: SparkSessionExtensions): SparkSessionExtensions = {
+    extensionConfClassNames.foreach { extensionConfClassName =>
+      try {
+        val extensionConfClass = Utils.classForName(extensionConfClassName)
+        val extensionConf = extensionConfClass.getConstructor().newInstance()
+          .asInstanceOf[SparkSessionExtensions => Unit]
+        extensionConf(extensions)
+      } catch {
+        // Ignore the error if we cannot find the class or when the class has the wrong type.
+        case e@(_: ClassCastException |
+                _: ClassNotFoundException |
+                _: NoClassDefFoundError) =>
+          logWarning(s"Cannot use $extensionConfClassName to configure session extensions.", e)
+      }
+    }
+    extensions
   }
 }
